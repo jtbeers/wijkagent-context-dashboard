@@ -19,23 +19,32 @@ const OFFLINE_PC_MAP = {
 };
 
 function initDB() {
-    return new Promise((resolve, reject) => {
-        const request = indexedDB.open("WijkagentCacheDB", 1);
-        request.onupgradeneeded = function(event) {
-            const db = event.target.result;
-            if (!db.objectStoreNames.contains("neighborhoods")) {
-                db.createObjectStore("neighborhoods", { keyPath: "buurtcode" });
+    return new Promise((resolve) => {
+        try {
+            if (!window.indexedDB) {
+                console.warn("IndexedDB wordt niet ondersteund door deze browser.");
+                return resolve(null);
             }
-        };
-        request.onsuccess = function(event) {
-            db = event.target.result;
-            updateCacheCountDisplay();
-            resolve(db);
-        };
-        request.onerror = function(event) {
-            console.error("IndexedDB fout:", event.target.error);
-            reject(event.target.error);
-        };
+            const request = indexedDB.open("WijkagentCacheDB", 1);
+            request.onupgradeneeded = function(event) {
+                const dbVal = event.target.result;
+                if (!dbVal.objectStoreNames.contains("neighborhoods")) {
+                    dbVal.createObjectStore("neighborhoods", { keyPath: "buurtcode" });
+                }
+            };
+            request.onsuccess = function(event) {
+                db = event.target.result;
+                updateCacheCountDisplay();
+                resolve(db);
+            };
+            request.onerror = function(event) {
+                console.warn("IndexedDB kon niet worden geopend:", event.target.error);
+                resolve(null);
+            };
+        } catch (e) {
+            console.warn("IndexedDB initialisatie mislukt:", e);
+            resolve(null);
+        }
     });
 }
 
