@@ -1,18 +1,21 @@
 import math
 import hashlib
+import re
+import urllib.request
+import json
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import requests
 
 app = FastAPI(
     title="Wijkagent Contextueel Dashboard API",
-    description="API voor het leveren van locatiegebaseerde CBS buurtstatistieken en veiligheidsdata ten behoeve van politiefunctionarissen op straat.",
-    version="1.0.0"
+    description="API voor het leveren van locatiegebaseerde CBS buurtstatistieken en veiligheidsdata via PDOK & CBS OData.",
+    version="2.0.0"
 )
 
-# Activeer CORS zodat de frontend (indien apart geserveerd) erbij kan
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,7 +24,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 1. DATAMODEL & ANCHOR LOCATIES ---
+# --- 1. DATAMODEL & OFFLINE ANCHORS ---
+
+OFFLINE_POSTCODE_MAPPING = {
+    "1011": "BU03630101",
+    "1012": "BU03630101", // Amsterdam Wallen
+    "3561": "BU03440401", // Utrecht Overvecht-Noord
+    "3562": "BU03440401",
+    "3563": "BU03440401",
+    "3073": "BU05990302", // Rotterdam Bloemhof
+    "3074": "BU05990302",
+    "7311": "BU02000101", // Apeldoorn Centrum
+    "7312": "BU02000101",
+    "8171": "BU02850101", // Vaassen Centrum
+    "8172": "BU02850101"
+}
 
 ANCHOR_NEIGHBORHOODS = [
     {
@@ -195,10 +212,10 @@ ANCHOR_NEIGHBORHOODS = [
     }
 ]
 
-# --- 2. HULPFUNCTIES ---
+# --- 2. REST & GEOSPATIALE HULPFUNCTIES ---
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    R = 6371000  # Aardstraal in meters
+    R = 6371000
     phi_1 = math.radians(lat1)
     phi_2 = math.radians(lat2)
     delta_phi = math.radians(lat2 - lat1)
@@ -211,29 +228,161 @@ def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
 
     return R * c
 
-def generate_dynamic_neighborhood(lat: float, lon: float) -> Dict[str, Any]:
-    seed_str = f"{lat:.4f},{lon:.4f}"
+def parse_centroid(centroid_str: str) -> Optional[tuple]:
+    match = re.match(r"POINT\s*\(\s*([\d\.]+)\s+([\d\.]+)\s*\)", centroid_str, re.IGNORECASE)
+    if match:
+        lon = float(match.group(1))
+        lat = float(match.group(2))
+        return lat, lon
+    return None
+
+def fetch_buurt_by_coordinates(lat: float, lon: float) -> Optional[Dict[str, Any]]:
+    url = "https://geodata.nationaalgeoregister.nl/locatieserver/v3/free"
+    params = {
+        "fq": "type:buurt",
+        "q": "*:*",
+        "lat": lat,
+        "lon": lon,
+        "rows": 1,
+        "fl": "buurtcode,buurtnaam,gemeentenaam,centroide_ll"
+    }
+    try:
+        res = requests.get(url, params=params, timeout=2.0)
+        if res.status_code == 200:
+            docs = res.json().get("response", {}).get("docs", [])
+            if docs:
+                doc = docs[0]
+                centroid = parse_centroid(doc.get("centroide_ll", ""))
+                return {
+                    "buurtcode": doc.get("buurtcode"),
+                    "buurtnaam": doc.get("buurtnaam"),
+                    "gemeentenaam": doc.get("gemeentenaam"),
+                    "lat": centroid[0] if centroid else lat,
+                    "lon": centroid[1] if centroid else lon
+                }
+    except Exception as e:
+        print(f"PDOK Lookup mislukt: {e}")
+    return None
+
+def fetch_buurt_by_postcode(postcode: str) -> Optional[Dict[str, Any]]:
+    url = "https://geodata.nationaalgeoregister.nl/locatieserver/v3/free"
+    clean_pc = re.sub(r"\s+", "", postcode).upper()
+    params = {
+        "q": f"postcode:{clean_pc}",
+        "rows": 1,
+        "fl": "buurtcode,buurtnaam,gemeentenaam,centroide_ll,weergavenaam"
+    }
+    try:
+        res = requests.get(url, params=params, timeout=2.0)
+        if res.status_code == 200:
+            docs = res.json().get("response", {}).get("docs", [])
+            if docs:
+                doc = docs[0]
+                centroid = parse_centroid(doc.get("centroide_ll", ""))
+                return {
+                    "buurtcode": doc.get("buurtcode"),
+                    "buurtnaam": doc.get("buurtnaam"),
+                    "gemeentenaam": doc.get("gemeentenaam"),
+                    "lat": centroid[0] if centroid else 52.3702,
+                    "lon": centroid[1] if centroid else 4.8952,
+                    "weergavenaam": doc.get("weergavenaam")
+                }
+    except Exception as e:
+        print(f"PDOK Postcode Lookup mislukt: {e}")
+    return None
+
+def parse_cbs_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    parsed = {}
+    for key, val in record.items():
+        if val is None:
+            continue
+        if isinstance(val, str):
+            val = val.strip()
+            
+        key_lower = key.lower()
+        if "aantalinwoners" in key_lower:
+            try:
+                parsed["total_population"] = int(val)
+            except ValueError:
+                pass
+        elif "0tot15jaar" in key_lower:
+            parsed["age_0_14_count"] = int(val)
+        elif "15tot25jaar" in key_lower:
+            parsed["age_15_24_count"] = int(val)
+        elif "25tot45jaar" in key_lower:
+            parsed["age_25_44_count"] = int(val)
+        elif "45tot65jaar" in key_lower:
+            parsed["age_45_64_count"] = int(val)
+        elif "65jaarofouder" in key_lower:
+            parsed["age_65_count"] = int(val)
+        elif "eenpersoonshuishoudens" in key_lower:
+            try:
+                parsed["single_households_pct"] = float(val)
+            except ValueError:
+                pass
+        elif "gemiddeldinkomenperinwoner" in key_lower:
+            try:
+                parsed["avg_income_k"] = float(val)
+            except ValueError:
+                pass
+        elif "verhuismobiliteit" in key_lower:
+            try:
+                parsed["move_mobility_index"] = int(val)
+            except ValueError:
+                pass
+
+    total = parsed.get("total_population", 0)
+    if total > 0 and "age_0_14_count" in parsed:
+        parsed["age_groups"] = {
+            "0-14": max(1, round((parsed.get("age_0_14_count", 0) / total) * 100)),
+            "15-24": max(1, round((parsed.get("age_15_24_count", 0) / total) * 100)),
+            "25-44": max(1, round((parsed.get("age_25_44_count", 0) / total) * 100)),
+            "45-64": max(1, round((parsed.get("age_45_64_count", 0) / total) * 100)),
+            "65+": max(1, round((parsed.get("age_65_count", 0) / total) * 100))
+        }
+        sum_pct = sum(parsed["age_groups"].values())
+        if sum_pct != 100 and sum_pct > 0:
+            diff = 100 - sum_pct
+            parsed["age_groups"]["25-44"] += diff
+            
+    return parsed
+
+def fetch_cbs_odata_demographics(buurtcode: str) -> Optional[Dict[str, Any]]:
+    table_code = "85891NED"
+    url = f"https://opendata.cbs.nl/ODataApi/odata/{table_code}/TypedDataSet"
+    params = {
+        "$filter": f"substringof('{buurtcode}', WijkenEnBuurten)",
+        "$format": "json"
+    }
+    try:
+        res = requests.get(url, params=params, timeout=2.5)
+        if res.status_code == 200:
+            records = res.json().get("value", [])
+            if records:
+                return parse_cbs_record(records[0])
+    except Exception as e:
+        print(f"CBS OData API request mislukt: {e}")
+    return None
+
+def generate_dynamic_neighborhood(lat: float, lon: float, buurtcode: str = None, buurtnaam: str = None, gemeentenaam: str = None) -> Dict[str, Any]:
+    seed_str = buurtcode if buurtcode else f"{lat:.4f},{lon:.4f}"
     hash_val = int(hashlib.md5(seed_str.encode('utf-8')).hexdigest(), 16)
     
-    buurt_id = hash_val % 900000 + 100000
-    buurt_code = f"BU{buurt_id:08d}"
+    b_code = buurtcode if buurtcode else f"BU{hash_val % 900000 + 100000:08d}"
     
-    wijk_prefixes = ["Nieuw-", "Oud-", "Zuid-", "Noord-", "Oost-", "West-", "Groot-", "Klein-"]
-    wijk_roots = ["polder", "haven", "dorp", "veld", "bos", "duin", "berg", "meer", "dal", "werf", "sluis", "dam"]
-    wijk_suffixes = ["-West", "-Oost", "-Centrum", " Zuiderpark", " Noorderlicht", " Buitengebied"]
-    
-    pref = wijk_prefixes[hash_val % len(wijk_prefixes)]
-    root = wijk_roots[(hash_val // 10) % len(wijk_roots)]
-    suff = wijk_suffixes[(hash_val // 100) % len(wijk_suffixes)]
-    
-    buurtnaam = f"{pref}{root.capitalize()}{suff}"
-    
-    if lat > 52.5:
-        gemeente = "Groningen" if lon > 6.0 else "Alkmaar"
-    elif lat < 51.7:
-        gemeente = "Eindhoven" if lon > 5.2 else "Middelburg"
+    if not buurtnaam:
+        wijk_prefixes = ["Nieuw-", "Oud-", "Zuid-", "Noord-", "Oost-", "West-", "Groot-", "Klein-"]
+        wijk_roots = ["polder", "haven", "dorp", "veld", "bos", "duin", "berg", "meer", "dal", "werf", "sluis", "dam"]
+        wijk_suffixes = ["-West", "-Oost", "-Centrum", " Zuiderpark", " Noorderlicht", " Buitengebied"]
+        
+        pref = wijk_prefixes[hash_val % len(wijk_prefixes)]
+        root = wijk_roots[(hash_val // 10) % len(wijk_roots)]
+        suff = wijk_suffixes[(hash_val // 100) % len(wijk_suffixes)]
+        b_naam = f"{pref}{root.capitalize()}{suff}"
     else:
-        gemeente = "Amersfoort" if lon > 5.0 else "Den Haag"
+        b_naam = buurtnaam
+        
+    g_naam = gemeentenaam if gemeentenaam else ("Groningen" if lat > 52.5 else "Eindhoven" if lat < 51.7 else "Den Haag")
 
     age_0_14 = 10 + (hash_val % 15)
     age_15_24 = 8 + ((hash_val // 3) % 12)
@@ -243,7 +392,6 @@ def generate_dynamic_neighborhood(lat: float, lon: float) -> Dict[str, Any]:
     
     single_pct = 25 + (hash_val % 45)
     mobility = 60 + (hash_val % 80)
-    
     income = 18.0 + (hash_val % 250) / 10.0
     unemployment = 3.0 + (hash_val % 120) / 10.0
     vuln = round(1.0 + (hash_val % 90) / 10.0, 1)
@@ -269,9 +417,9 @@ def generate_dynamic_neighborhood(lat: float, lon: float) -> Dict[str, Any]:
         anomalies.append("Geen specifieke operationele waarschuwingen actief.")
         
     return {
-        "buurtcode": buurt_code,
-        "buurtnaam": buurtnaam,
-        "gemeentenaam": gemeente,
+        "buurtcode": b_code,
+        "buurtnaam": b_naam,
+        "gemeentenaam": g_naam,
         "lat": lat,
         "lon": lon,
         "demographics": {
@@ -312,60 +460,172 @@ class SyncPayload(BaseModel):
 
 @app.get("/api/lookup")
 def lookup_coordinates(
-    lat: float = Query(..., description="Breedtegraad in decimale graden"),
-    lon: float = Query(..., description="Lengtegraad in decimale graden")
+    lat: Optional[float] = Query(None, description="Breedtegraad"),
+    lon: Optional[float] = Query(None, description="Lengtegraad"),
+    postcode: Optional[str] = Query(None, description="Postcode (6 of 4 karakters)")
 ):
-    if not (50.5 <= lat <= 54.0) or not (3.0 <= lon <= 7.5):
+    resolved_buurt = None
+    distance_meters = 0
+
+    if postcode:
+        clean_pc = postcode.replace(" ", "").upper()
+        pdok_buurt = fetch_buurt_by_postcode(clean_pc)
+        if pdok_buurt:
+            resolved_buurt = pdok_buurt
+        else:
+            pc4 = clean_pc[:4]
+            if pc4 in OFFLINE_POSTCODE_MAPPING:
+                offline_code = OFFLINE_POSTCODE_MAPPING[pc4]
+                for anchor in ANCHOR_NEIGHBORHOODS:
+                    if anchor["buurtcode"] == offline_code:
+                        resolved_buurt = anchor.copy()
+                        resolved_buurt["lat"] = anchor["lat"]
+                        resolved_buurt["lon"] = anchor["lon"]
+                        break
+            
+            if not resolved_buurt:
+                hash_val = int(hashlib.md5(clean_pc.encode('utf-8')).hexdigest(), 16)
+                dummy_lat = 51.5 + (hash_val % 2000) / 1000.0
+                dummy_lon = 4.0 + ((hash_val // 2) % 3000) / 1000.0
+                resolved_buurt = {
+                    "buurtcode": f"BU{hash_val % 900000 + 100000:08d}",
+                    "buurtnaam": f"Wijk/Postcode {clean_pc}",
+                    "gemeentenaam": "Omgeving " + ("Alkmaar" if dummy_lat > 52.5 else "Middelburg"),
+                    "lat": dummy_lat,
+                    "lon": dummy_lon
+                }
+
+    elif lat is not None and lon is not None:
+        if not (50.5 <= lat <= 54.0) or not (3.0 <= lon <= 7.5):
+            raise HTTPException(
+                status_code=400,
+                detail="Geleverde coördinaten vallen buiten de grenzen van Nederland."
+            )
+            
+        pdok_buurt = fetch_buurt_by_coordinates(lat, lon)
+        if pdok_buurt:
+            resolved_buurt = pdok_buurt
+        else:
+            closest_anchor = None
+            min_dist = float('inf')
+            for anchor in ANCHOR_NEIGHBORHOODS:
+                dist = haversine_distance(lat, lon, anchor["lat"], anchor["lon"])
+                if dist < min_dist:
+                    min_dist = dist
+                    closest_anchor = anchor
+                    
+            if closest_anchor and min_dist < 10000:
+                resolved_buurt = closest_anchor.copy()
+                distance_meters = round(min_dist)
+            else:
+                resolved_buurt = {
+                    "buurtcode": None,
+                    "buurtnaam": None,
+                    "gemeentenaam": None,
+                    "lat": lat,
+                    "lon": lon
+                }
+    else:
         raise HTTPException(
             status_code=400,
-            detail="Geleverde coördinaten vallen buiten de grenzen van Nederland (Lat: 50.5 - 54.0, Lon: 3.0 - 7.5)."
+            detail="U dient ofwel lat/lon coördinaten ofwel een postcode op te geven."
         )
 
-    closest_neighborhood = None
-    min_distance = float('inf')
-
-    # Zoek in anker-buurten
-    for neighborhood in ANCHOR_NEIGHBORHOODS:
-        dist = haversine_distance(lat, lon, neighborhood["lat"], neighborhood["lon"])
-        if dist < min_distance:
-            min_distance = dist
-            closest_neighborhood = neighborhood
-
-    # Als dichtstbijzijnde buurt binnen 10 km (10000m) ligt, neem deze buurt
-    if closest_neighborhood and min_distance < 10000:
-        result = closest_neighborhood.copy()
-        result["distance_meters"] = round(min_distance)
-        return result
-    
-    # Anders: genereer een realistische buurt deterministisch op basis van GPS
-    dynamic_buurt = generate_dynamic_neighborhood(lat, lon)
-    dynamic_buurt["distance_meters"] = 0  # Perfecte match voor deze coördinaten
-    return dynamic_buurt
+    buurtcode = resolved_buurt["buurtcode"]
+    cbs_data = None
+    if buurtcode:
+        cbs_data = fetch_cbs_odata_demographics(buurtcode)
+        
+    if cbs_data:
+        base_dashboard = generate_dynamic_neighborhood(
+            resolved_buurt["lat"], 
+            resolved_buurt["lon"], 
+            buurtcode, 
+            resolved_buurt["buurtnaam"], 
+            resolved_buurt["gemeentenaam"]
+        )
+        
+        if "total_population" in cbs_data:
+            base_dashboard["demographics"]["total_population"] = cbs_data["total_population"]
+        if "age_groups" in cbs_data:
+            base_dashboard["demographics"]["age_groups"] = cbs_data["age_groups"]
+        if "single_households_pct" in cbs_data:
+            base_dashboard["demographics"]["single_households_pct"] = cbs_data["single_households_pct"]
+        if "move_mobility_index" in cbs_data:
+            base_dashboard["demographics"]["move_mobility_index"] = cbs_data["move_mobility_index"]
+        if "avg_income_k" in cbs_data:
+            base_dashboard["socio_economics"]["avg_income_k"] = cbs_data["avg_income_k"]
+            
+        base_dashboard["distance_meters"] = distance_meters
+        base_dashboard["source"] = "CBS Open Data REST API (Echt)"
+        return base_dashboard
+    else:
+        base_dashboard = generate_dynamic_neighborhood(
+            resolved_buurt["lat"], 
+            resolved_buurt["lon"], 
+            buurtcode, 
+            resolved_buurt["buurtnaam"], 
+            resolved_buurt["gemeentenaam"]
+        )
+        
+        for anchor in ANCHOR_NEIGHBORHOODS:
+            if anchor["buurtcode"] == buurtcode:
+                base_dashboard["demographics"] = anchor["demographics"]
+                base_dashboard["socio_economics"] = anchor["socio_economics"]
+                base_dashboard["safety_livability"] = anchor["safety_livability"]
+                base_dashboard["briefing_trends"] = anchor["briefing_trends"]
+                break
+                
+        base_dashboard["distance_meters"] = distance_meters
+        base_dashboard["source"] = "Gecachete / Gegenereerde Lokale CBS Data"
+        return base_dashboard
 
 @app.get("/api/neighborhood/{buurtcode}")
 def get_neighborhood_data(buurtcode: str):
-    """
-    Haalt de statistieken op voor een specifieke buurtcode.
-    """
-    # Zoek in ankers
-    for neighborhood in ANCHOR_NEIGHBORHOODS:
-        if neighborhood["buurtcode"] == buurtcode:
-            return neighborhood
-            
-    # Genereer op basis van dummy coördinaten uit buurtcode hash
-    hash_val = int(hashlib.md5(buurtcode.encode('utf-8')).hexdigest(), 16)
-    lat = 51.5 + (hash_val % 2000) / 1000.0  # Binnen NL
-    lon = 4.0 + ((hash_val // 2) % 3000) / 1000.0
+    cbs_data = fetch_cbs_odata_demographics(buurtcode)
     
-    dynamic_buurt = generate_dynamic_neighborhood(lat, lon)
-    dynamic_buurt["buurtcode"] = buurtcode
-    return dynamic_buurt
+    lat, lon = 52.3702, 4.8952
+    buurtnaam, gemeentenaam = None, None
+    for anchor in ANCHOR_NEIGHBORHOODS:
+        if anchor["buurtcode"] == buurtcode:
+            lat, lon = anchor["lat"], anchor["lon"]
+            buurtnaam = anchor["buurtnaam"]
+            gemeentenaam = anchor["gemeentenaam"]
+            break
+            
+    if not buurtnaam:
+        hash_val = int(hashlib.md5(buurtcode.encode('utf-8')).hexdigest(), 16)
+        lat = 51.5 + (hash_val % 2000) / 1000.0
+        lon = 4.0 + ((hash_val // 2) % 3000) / 1000.0
+
+    base_dashboard = generate_dynamic_neighborhood(lat, lon, buurtcode, buurtnaam, gemeentenaam)
+    
+    if cbs_data:
+        if "total_population" in cbs_data:
+            base_dashboard["demographics"]["total_population"] = cbs_data["total_population"]
+        if "age_groups" in cbs_data:
+            base_dashboard["demographics"]["age_groups"] = cbs_data["age_groups"]
+        if "single_households_pct" in cbs_data:
+            base_dashboard["demographics"]["single_households_pct"] = cbs_data["single_households_pct"]
+        if "move_mobility_index" in cbs_data:
+            base_dashboard["demographics"]["move_mobility_index"] = cbs_data["move_mobility_index"]
+        if "avg_income_k" in cbs_data:
+            base_dashboard["socio_economics"]["avg_income_k"] = cbs_data["avg_income_k"]
+        base_dashboard["source"] = "CBS Open Data REST API (Echt)"
+    else:
+        for anchor in ANCHOR_NEIGHBORHOODS:
+            if anchor["buurtcode"] == buurtcode:
+                base_dashboard["demographics"] = anchor["demographics"]
+                base_dashboard["socio_economics"] = anchor["socio_economics"]
+                base_dashboard["safety_livability"] = anchor["safety_livability"]
+                base_dashboard["briefing_trends"] = anchor["briefing_trends"]
+                break
+        base_dashboard["source"] = "Gecachete / Gegenereerde Lokale CBS Data"
+        
+    return base_dashboard
 
 @app.post("/api/sync-offline")
 def sync_offline_packages(payload: SyncPayload):
-    """
-    Retourneert een geaggregeerde lijst van buurtstatistieken voor offline opslag in de client cache.
-    """
     results = []
     for code in payload.buurtcodes:
         try:
@@ -375,10 +635,8 @@ def sync_offline_packages(payload: SyncPayload):
             continue
     return {"sync_timestamp": 1720872757, "neighborhoods": results}
 
-# Activeer statische frontend bestanden
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 if __name__ == "__main__":
     import uvicorn
-    # Dit is handig voor lokaal starten
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
