@@ -204,7 +204,7 @@ ANCHOR_NEIGHBORHOODS = [
         },
         "briefing_trends": {
             "anomalies": [
-                "Babbeltrucs: Waarschuwing actief voor diefstal bij ouderen aan de deur door zich voor te doen als bezorgers.",
+                "Babbeltrucs: Waarschuwing actief voor diefstal bij ouderen aan de door zich voor te doen als bezorgers.",
                 "Geen andere operationele bijzonderheden."
             ],
             "regional_comparison": "Zeer laag incidentenniveau. Veiligheidsrisico's zijn minimaal."
@@ -247,7 +247,7 @@ def fetch_buurt_by_coordinates(lat: float, lon: float) -> Optional[Dict[str, Any
         "fl": "buurtcode,buurtnaam,gemeentenaam,centroide_ll"
     }
     try:
-        res = requests.get(url, params=params, timeout=2.0)
+        res = requests.get(url, params=params, timeout=1.5)
         if res.status_code == 200:
             docs = res.json().get("response", {}).get("docs", [])
             if docs:
@@ -273,7 +273,7 @@ def fetch_buurt_by_postcode(postcode: str) -> Optional[Dict[str, Any]]:
         "fl": "buurtcode,buurtnaam,gemeentenaam,centroide_ll,weergavenaam"
     }
     try:
-        res = requests.get(url, params=params, timeout=2.0)
+        res = requests.get(url, params=params, timeout=1.5)
         if res.status_code == 200:
             docs = res.json().get("response", {}).get("docs", [])
             if docs:
@@ -290,6 +290,40 @@ def fetch_buurt_by_postcode(postcode: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         print(f"PDOK Postcode Lookup mislukt: {e}")
     return None
+
+def map_buurtcode_to_cbs_format(buurtcode: str) -> str:
+    """
+    Vertaalt een numerieke buurtcode (bijv. BU03630101) naar het CBS StatLine wijk/buurt code formaat met letters (bijv. BU0363AB01).
+    Dit is nodig omdat CBS StatLine OData v3 alfabetische coderingen gebruikt voor wijken.
+    Formaat:
+    BU (0-1)
+    Gemeentecode (2-5)
+    Wijkcode in cijfers (6-7) -> Wijkcode in letters (bijv. 00->AA, 01->AB, 02->AC, 10->BA, 11->BB)
+    Buurtcode in cijfers (8-9)
+    """
+    if not buurtcode or not buurtcode.startswith("BU") or len(buurtcode) < 10:
+        return buurtcode
+        
+    prefix = buurtcode[:2]        # BU
+    muni = buurtcode[2:6]         # 0363 (Amsterdam)
+    district_digits = buurtcode[6:8] # 01
+    buurt_digits = buurtcode[8:10]   # 01
+    
+    # Vertaling van cijfers naar letters
+    # 0 -> A, 1 -> B, ..., 9 -> J
+    digit_to_char = {
+        '0': 'A', '1': 'B', '2': 'C', '3': 'D', '4': 'E',
+        '5': 'F', '6': 'G', '7': 'H', '8': 'I', '9': 'J'
+    }
+    
+    try:
+        char1 = digit_to_char[district_digits[0]]
+        char2 = digit_to_char[district_digits[1]]
+        district_chars = f"{char1}{char2}"
+    except (KeyError, IndexError):
+        district_chars = district_digits
+        
+    return f"{prefix}{muni}{district_chars}{buurt_digits}"
 
 def parse_cbs_record(record: Dict[str, Any]) -> Dict[str, Any]:
     parsed = {}
@@ -315,15 +349,20 @@ def parse_cbs_record(record: Dict[str, Any]) -> Dict[str, Any]:
             parsed["age_45_64_count"] = int(val)
         elif "65jaarofouder" in key_lower:
             parsed["age_65_count"] = int(val)
+        elif "huishoudenstotaal" in key_lower:
+            try:
+                parsed["total_households"] = int(val)
+            except ValueError:
+                pass
         elif "eenpersoonshuishoudens" in key_lower:
             try:
-                parsed["single_households_pct"] = float(val)
+                parsed["single_households_count"] = int(val)
             except ValueError:
                 pass
         elif "gemiddeldinkomenperinwoner" in key_lower:
             try:
                 parsed["avg_income_k"] = float(val)
-            except ValueError:
+            except (ValueError, TypeError):
                 pass
         elif "verhuismobiliteit" in key_lower:
             try:
@@ -345,23 +384,28 @@ def parse_cbs_record(record: Dict[str, Any]) -> Dict[str, Any]:
             diff = 100 - sum_pct
             parsed["age_groups"]["25-44"] += diff
             
+    total_hh = parsed.get("total_households", 0)
+    if total_hh > 0 and "single_households_count" in parsed:
+        parsed["single_households_pct"] = round((parsed["single_households_count"] / total_hh) * 100)
+            
     return parsed
 
 def fetch_cbs_odata_demographics(buurtcode: str) -> Optional[Dict[str, Any]]:
-    table_code = "85891NED"
+    cbs_buurtcode = map_buurtcode_to_cbs_format(buurtcode)
+    table_code = "85984NED"
     url = f"https://opendata.cbs.nl/ODataApi/odata/{table_code}/TypedDataSet"
     params = {
-        "$filter": f"substringof('{buurtcode}', WijkenEnBuurten)",
+        "$filter": f"WijkenEnBuurten eq '{cbs_buurtcode}'",
         "$format": "json"
     }
     try:
-        res = requests.get(url, params=params, timeout=2.5)
+        res = requests.get(url, params=params, timeout=1.5)
         if res.status_code == 200:
             records = res.json().get("value", [])
             if records:
                 return parse_cbs_record(records[0])
     except Exception as e:
-        print(f"CBS OData API request mislukt: {e}")
+        print(f"CBS OData API request mislukt voor {cbs_buurtcode}: {e}")
     return None
 
 def generate_dynamic_neighborhood(lat: float, lon: float, buurtcode: str = None, buurtnaam: str = None, gemeentenaam: str = None) -> Dict[str, Any]:

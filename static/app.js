@@ -41,13 +41,17 @@ function initDB() {
 
 function cacheNeighborhood(data) {
     if (!db) return;
-    const transaction = db.transaction(["neighborhoods"], "readwrite");
-    const store = transaction.objectStore("neighborhoods");
-    data.cached_at = Date.now();
-    store.put(data);
-    transaction.oncomplete = function() {
-        updateCacheCountDisplay();
-    };
+    try {
+        const transaction = db.transaction(["neighborhoods"], "readwrite");
+        const store = transaction.objectStore("neighborhoods");
+        data.cached_at = Date.now();
+        store.put(data);
+        transaction.oncomplete = function() {
+            updateCacheCountDisplay();
+        };
+    } catch (e) {
+        console.warn("Fout bij opslaan in cache:", e);
+    }
 }
 
 function getAllCachedNeighborhoods() {
@@ -195,7 +199,6 @@ async function fetchNeighborhoodData(query) {
             showSearchFeedback(`Netwerkfout. Teruggevallen op offline cache.`, "error");
         } else {
             showSearchFeedback(`Fout: ${error.message}`, "error");
-            alert(`Fout bij laden: ${error.message}`);
         }
     } finally {
         hideLoader();
