@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Wijkagent Dashboard - Buurtcontext</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="app-container">
+    <!-- HEADER -->
+    <header>
+        <div class="header-top">
+            <div class="app-title">POLITIE WijkContext</div>
+            <div class="status-badges">
+                <span id="badge-gps" class="badge badge-gps-simulated">Simulatie</span>
+                <span id="badge-network" class="badge badge-connection-online">Online</span>
+            </div>
+        </div>
+        
+        <div class="location-display">
+            <div id="neighborhood-name" class="neighborhood-title">Laden...</div>
+            <div class="neighborhood-meta">
+                <span id="neighborhood-code">BU00000000</span>
+                <span id="neighborhood-distance">Afstand: 0m</span>
+            </div>
+        </div>
+    </header>
+
+
+    <!-- SEARCH & LOCATION PANEL -->
+    <section class="search-panel">
+        <div class="search-title">Locatie Bepalen</div>
+        <div class="search-row">
+            <div class="input-wrapper">
+                <input type="text" id="postcode-input" placeholder="Postcode (bijv. 1012JS)" maxlength="7">
+                <button class="search-btn" id="btn-search-postcode" onclick="searchByPostcode()">Zoek</button>
+            </div>
+            <button class="gps-btn" id="btn-device-gps" onclick="useDeviceGPS(this)">
+                <span>📍 GPS</span>
+            </button>
+        </div>
+        <div id="search-feedback" class="search-feedback hidden"></div>
+    </section>
+
+    <!-- SIMULATOR PRESETS -->
+    <section class="simulator-panel">
+        <div class="simulator-label">Simuleer Preset Locatie (Demo)</div>
+        <div class="simulator-buttons">
+            <button class="sim-btn active" id="btn-preset-ams" onclick="setSimulatedLocation('AMS', 52.3702, 4.8952, this)">A'dam Wallen</button>
+            <button class="sim-btn" id="btn-preset-utr" onclick="setSimulatedLocation('UTR', 52.1158, 5.1095, this)">Utr. Overvecht</button>
+            <button class="sim-btn" id="btn-preset-rot" onclick="setSimulatedLocation('ROT', 51.8954, 4.5074, this)">R'dam Bloemhof</button>
+            <button class="sim-btn" id="btn-preset-apd" onclick="setSimulatedLocation('APD', 52.2112, 5.9699, this)">Apeldoorn C.</button>
+            <button class="sim-btn" id="btn-preset-vaa" onclick="setSimulatedLocation('VAA', 52.2892, 5.9681, this)">Vaassen (Land)</button>
+        </div>
+    </section>
+
+
+    <!-- MAIN DASHBOARD CONTENT -->
+    <main>
+        <!-- 1. BRIEFING & ANOMALIES (Red/Orange styling) -->
+        <article class="card card-briefing" id="card-briefing">
+            <h2 class="card-title">
+                <span>Operationele Briefing & Trends (30d)</span>
+                <span style="font-size: 0.75rem; font-weight: normal; color: var(--accent-orange);">Alert Actief</span>
+            </h2>
+            <ul class="briefing-alert-list" id="briefing-list">
+                <!-- Wordt dynamisch gevuld -->
+            </ul>
+            <p class="briefing-comparison" id="briefing-comparison">
+                Vergelijking met regiogemiddelde...
+            </p>
+        </article>
+
+        <!-- 2. VEILIGHEID & LEEFBAARHEID -->
+        <article class="card">
+            <h2 class="card-title">Veiligheid & Leefbaarheid</h2>
+            
+            <div class="stats-grid-2">
+                <!-- Leefbaarometer score -->
+                <div class="metric-box metric-leefbaarheid">
+                    <div class="metric-label">Status Leefbaarometer</div>
+                    <div class="leefbaarheid-wrapper">
+                        <div class="leefbaarheid-text">
+                            <span class="metric-unit">Klasse:</span>
+                            <div class="leefbaarheid-class" id="lb-class">Laden...</div>
+                        </div>
+                        <div>
+                            <span class="metric-unit">Score:</span>
+                            <div class="metric-value" id="lb-score">0.0</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Incidenten trends -->
+                <div style="grid-column: span 2; margin-top: 5px;">
+                    <div class="metric-label" style="text-align: left; margin-bottom: 5px;">Incidenten per 1.000 inw. (Historisch)</div>
+                    
+                    <div class="safety-row">
+                        <div class="safety-info">
+                            <span class="safety-name">High Impact Crime</span>
+                            <span class="safety-trend-indicator">Overvallen, geweld, zeden</span>
+                        </div>
+                        <span id="val-hic" class="safety-value-badge safety-high">0.0</span>
+                    </div>
+
+                    <div class="safety-row">
+                        <div class="safety-info">
+                            <span class="safety-name">Woninginbraak</span>
+                            <span class="safety-trend-indicator">Inbraken & pogingen</span>
+                        </div>
+                        <span id="val-burglary" class="safety-value-badge safety-medium">0.0</span>
+                    </div>
+
+                    <div class="safety-row">
+                        <div class="safety-info">
+                            <span class="safety-name">Jeugdoverlast</span>
+                            <span class="safety-trend-indicator">Meldingen groepen</span>
+                        </div>
+                        <span id="val-youth" class="safety-value-badge safety-low">0.0</span>
+                    </div>
+                </div>
+            </div>
+        </article>
+
+        <!-- 3. SOCIO-ECONOMISCHE INDICATOREN -->
+        <article class="card">
+            <h2 class="card-title">Socio-Economische Status</h2>
+            <div class="stats-grid-2">
+                <div class="metric-box">
+                    <div class="metric-label">Gem. Inkomen</div>
+                    <div class="metric-value" id="val-income">€0,-</div>
+                    <div class="metric-unit">per inwoner / jr</div>
+                </div>
+
+                <div class="metric-box">
+                    <div class="metric-label">Werkloosheid</div>
+                    <div class="metric-value" id="val-unemployment">0%</div>
+                    <div class="metric-unit">van beroepsbevolk.</div>
+                </div>
+
+                <div class="metric-box" style="grid-column: span 2; margin-top: 5px;">
+                    <div class="metric-label">Brede Kwetsbaarheidsscore</div>
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span class="metric-unit">Complexiteit & risico index:</span>
+                        <span class="metric-value" id="val-vulnerability" style="color: var(--accent-yellow);">0.0 <span class="metric-unit">/ 10</span></span>
+                    </div>
+                </div>
+            </div>
+        </article>
+
+        <!-- 4. DEMOGRAFISCH PROFIEL -->
+        <article class="card">
+            <h2 class="card-title">Demografie & Mobiliteit</h2>
+            <div class="stats-grid-2" style="margin-bottom: 12px;">
+                <div class="metric-box">
+                    <div class="metric-label">Eenpersoonshuishoudens</div>
+                    <div class="metric-value" id="val-single">0%</div>
+                </div>
+                <div class="metric-box">
+                    <div class="metric-label">Verhuismobiliteit</div>
+                    <div class="metric-value" id="val-mobility">0</div>
+                    <div class="metric-unit">Index vs Landelijk</div>
+                </div>
+            </div>
+
+            <div class="metric-label" style="text-align: left; margin-bottom: 5px;">Leeftijdsopbouw Wijk</div>
+            <div class="age-graph" id="age-graph-container">
+                <!-- Leeftijd rijen worden hier geplaatst door JS -->
+            </div>
+        </article>
+
+        <!-- 5. OFFLINE BEHEER & CACHING -->
+        <article class="card">
+            <h2 class="card-title">Offline Databeheer & Sync</h2>
+            <div class="cache-panel">
+                <div class="cache-info">
+                    <span>Lokale Cache status:</span>
+                    <span id="cache-count" style="font-weight: bold; color: var(--accent-yellow);">0 buurten</span>
+                </div>
+                <div class="cache-buttons">
+                    <button class="cache-btn" onclick="syncAllAnchorNeighborhoods()">
+                        🔄 Sync Wijkpakket
+                    </button>
+                    <button id="btn-offline-toggle" class="cache-btn cache-btn-offline" onclick="toggleOfflineMode()">
+                        📶 Offline Modus
+                    </button>
+                </div>
+            </div>
+        </article>
+    </main>
+
+    <!-- LOADING OVERLAY -->
+    <div class="loader-overlay" id="loader">
+        <div class="spinner"></div>
+        <div class="loader-text" id="loader-text">Locatiedata ophalen...</div>
+    </div>
+</div>
+
+<script src="app.js?v=2.0.2"></script>
+</body>
+</html>
