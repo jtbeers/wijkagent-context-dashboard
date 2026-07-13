@@ -28,15 +28,15 @@ app.add_middleware(
 
 OFFLINE_POSTCODE_MAPPING = {
     "1011": "BU03630101",
-    "1012": "BU03630101", // Amsterdam Wallen
-    "3561": "BU03440401", // Utrecht Overvecht-Noord
+    "1012": "BU03630101", # Amsterdam Wallen
+    "3561": "BU03440401", # Utrecht Overvecht-Noord
     "3562": "BU03440401",
     "3563": "BU03440401",
-    "3073": "BU05990302", // Rotterdam Bloemhof
+    "3073": "BU05990302", # Rotterdam Bloemhof
     "3074": "BU05990302",
-    "7311": "BU02000101", // Apeldoorn Centrum
+    "7311": "BU02000101", # Apeldoorn Centrum
     "7312": "BU02000101",
-    "8171": "BU02850101", // Vaassen Centrum
+    "8171": "BU02850101", # Vaassen Centrum
     "8172": "BU02850101"
 }
 
